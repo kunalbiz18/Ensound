@@ -13,6 +13,9 @@ jobs:
           channel: 'stable'
           flutter-version: '3.24.2'
 
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
       - name: Pub get
         working-directory: "${{ github.workspace }}"
         run: flutter pub get
@@ -29,20 +32,26 @@ jobs:
         working-directory: "${{ github.workspace }}"
         run: |
           flutter clean
-          dart pub global activate flutter_distributor
           flutter build windows --release
-          flutter_distributor package --platform windows --targets exe
+          # Optional: distributor packaging (does not block)
+          dart pub global activate flutter_distributor
+          flutter_distributor package --platform windows --targets exe || echo "flutter_distributor failed or skipped"
 
-      - name: Find first .exe file
+      - name: Locate built Windows artifacts
         id: find_exe
         run: |
-          $exeFile = Get-ChildItem -Path "${{ github.workspace }}\dist" -Filter *.exe -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($exeFile) {
-            Write-Host "Found .exe file: $($exeFile.FullName)"
-            "exe_path=$($exeFile.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $releaseDir = "${{ github.workspace }}\build\windows\x64\runner\Release"
+          if (-Not (Test-Path $releaseDir)) {
+            Write-Error "Release directory not found: $releaseDir"
+            exit 1
           }
-          else {
-            Write-Error "No .exe files found in the dist directory."
+          $exeFile = Get-ChildItem -Path $releaseDir -Filter *.exe -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($exeFile) {
+            Write-Host "Found built exe: $($exeFile.FullName)"
+            "exe_path=$($exeFile.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "release_dir=$releaseDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Error "No .exe files found in $releaseDir"
             exit 1
           }
           
@@ -79,21 +88,24 @@ jobs:
           $signedExePath = "${{ steps.find_exe.outputs.exe_path }}".Replace(".exe", "_signed.exe")
           & "${{ github.workspace }}/osslsigncode/bin/osslsigncode.exe" verify -in "$signedExePath" -TSA-CAfile DigiCertGlobalRootCA.crt -CAfile cert.pem
 
-      - name: Select artifact path (signed if available)
-        id: choose_upload
+      - name: Zip Windows release folder
+        id: zip_release
         run: |
-          $exePath = "${{ steps.find_exe.outputs.exe_path }}"
-          $signed = $exePath.Replace(".exe", "_signed.exe")
-          if (Test-Path "$signed") {
-            Write-Host "Using signed artifact: $signed"
-            "upload_path=$signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          } else {
-            Write-Host "Using unsigned artifact: $exePath"
-            "upload_path=$exePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          }
+          $releaseDir = "${{ steps.find_exe.outputs.release_dir }}"
+          $zipPath = "${{ github.workspace }}\Ensound-Windows-Release.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipPath
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           
       - name: Upload Windows exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Ensound Windows exe
-          path: "${{ steps.choose_upload.outputs.upload_path }}"
+          name: Ensound Windows Release (zip)
+          path: "${{ steps.zip_release.outputs.zip_path }}"
+
+      - name: Upload signed exe (if available)
+        if: ${{ secrets.KEY_PEM != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ensound Windows exe (signed)
+          path: "${{ steps.find_exe.outputs.exe_path }}".Replace(".exe", "_signed.exe")
