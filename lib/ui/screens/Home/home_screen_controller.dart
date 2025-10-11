@@ -160,6 +160,14 @@ class HomeScreenController extends GetxController {
       // ignore: unused_catch_stack
     } on NetworkError catch (r, e) {
       printERROR("Home Content not loaded due to ${r.message}");
+      // Attempt a brief retry to avoid showing empty screen
+      if (!silent) {
+        try {
+          await Future.delayed(const Duration(milliseconds: 750));
+          await loadContentFromNetwork(silent: true);
+          return;
+        } catch (_) {}
+      }
       await Future.delayed(const Duration(seconds: 1));
       networkError.value = !silent;
     }

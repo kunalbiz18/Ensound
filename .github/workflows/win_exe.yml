@@ -13,6 +13,13 @@ jobs:
           channel: 'stable'
           flutter-version: '3.24.2'
 
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Pub get
+        working-directory: "${{ github.workspace }}"
+        run: flutter pub get
+
       - name: Update lang data
         working-directory: "${{ github.workspace }}"
         run: dart localization/generator.dart
@@ -25,20 +32,27 @@ jobs:
         working-directory: "${{ github.workspace }}"
         run: |
           flutter clean
+          flutter build windows --release
+          # Optional: distributor packaging (does not block)
           dart pub global activate flutter_distributor
-          flutter_distributor package --platform windows --targets exe
+          flutter_distributor package --platform windows --targets exe || echo "flutter_distributor failed or skipped"
 
-      - name: Find first .exe file
+      - name: Locate built Windows artifacts
         id: find_exe
         run: |
-          $lastSubDir = Get-ChildItem -Path "${{ github.workspace }}/dist" -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          $exeFile = Get-ChildItem -Path "$($lastSubDir.FullName)/*.exe" | Select-Object -First 1
+          $releaseDir = "${{ github.workspace }}\build\windows\x64\runner\Release"
+          if (-Not (Test-Path $releaseDir)) {
+            Write-Error "Release directory not found: $releaseDir"
+            exit 1
+          }
+          $exeFile = Get-ChildItem -Path $releaseDir -Filter *.exe -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($exeFile) {
-              echo "Found .exe file: $($exeFile.FullName)"
-              echo "::set-output name=exe_path::$($exeFile.FullName)"
+            Write-Host "Found built exe: $($exeFile.FullName)"
+            "exe_path=$($exeFile.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "release_dir=$releaseDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-              Write-Error "No .exe files found in the dist directory."
-              exit 1
+            Write-Error "No .exe files found in $releaseDir"
+            exit 1
           }
           
       - name: Set up osslsigncode
@@ -52,6 +66,7 @@ jobs:
         run: mkdir signed
 
       - name: Collecting certs and key
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${{ secrets.KEY_PEM }}")) | Out-File -FilePath key.pem -Encoding ASCII
@@ -59,6 +74,7 @@ jobs:
           cp "${{ github.workspace }}/win_cert/cert.pem" .
 
       - name: Sign executable
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           $exePath = "${{ steps.find_exe.outputs.exe_path }}"
@@ -66,13 +82,30 @@ jobs:
           & "${{ github.workspace }}/osslsigncode/bin/osslsigncode.exe" sign -certs cert.pem -key key.pem -t http://timestamp.digicert.com -in "$exePath" -out "$signedExePath"
 
       - name: Verify signature
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           $signedExePath = "${{ steps.find_exe.outputs.exe_path }}".Replace(".exe", "_signed.exe")
           & "${{ github.workspace }}/osslsigncode/bin/osslsigncode.exe" verify -in "$signedExePath" -TSA-CAfile DigiCertGlobalRootCA.crt -CAfile cert.pem
+
+      - name: Zip Windows release folder
+        id: zip_release
+        run: |
+          $releaseDir = "${{ steps.find_exe.outputs.release_dir }}"
+          $zipPath = "${{ github.workspace }}\Ensound-Windows-Release.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "$releaseDir\*" -DestinationPath $zipPath
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           
       - name: Upload Windows exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Harmony music windows exe
-          path: "${{ github.workspace }}/dist/**/*signed.exe"
+          name: Ensound Windows Release (zip)
+          path: "${{ steps.zip_release.outputs.zip_path }}"
+
+      - name: Upload signed exe (if available)
+        if: ${{ secrets.KEY_PEM != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ensound Windows exe (signed)
+          path: "${{ steps.find_exe.outputs.exe_path }}".Replace(".exe", "_signed.exe")

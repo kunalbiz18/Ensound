@@ -26,11 +26,14 @@ jobs:
       - name: Install packages
         run: flutter pub get
 
+      - name: Generate localization
+        run: dart localization/generator.dart
+
       - name: Linter
         run: flutter analyze
 
-      - name: Build APK
-        run: flutter build apk
+      - name: Build APK (release)
+        run: flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v3

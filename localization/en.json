@@ -150,6 +150,8 @@
   "resetToDefault": "Restore default settings",
   "resetToDefaultDes": "Reset app settings to default (Restart required)",
   "resetToDefaultMsg": "Settings reset to default completed, Please restart app",
+  "lowBandwidth": "Low bandwidth mode",
+  "lowBandwidthDes": "Prefer lower bitrate streams; smoother on poor networks",
   "github": "GitHub",
   "githubDes": "View GitHub source code \nif you like this project, don't forget to give a ⭐",
   "by": "by",
