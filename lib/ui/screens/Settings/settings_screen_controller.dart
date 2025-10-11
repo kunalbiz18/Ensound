@@ -46,6 +46,7 @@ class SettingsScreenController extends GetxController {
   final backgroundPlayEnabled = true.obs;
   final restorePlaybackSession = false.obs;
   final cacheHomeScreenData = true.obs;
+  final lowBandwidthMode = false.obs;
   final currentVersion = "V1.12.0";
 
   @override
@@ -99,6 +100,7 @@ class SettingsScreenController extends GetxController {
     restorePlaybackSession.value =
         setBox.get("restrorePlaybackSession") ?? false;
     cacheHomeScreenData.value = setBox.get("cacheHomeScreenData") ?? true;
+    lowBandwidthMode.value = setBox.get("lowBandwidthMode") ?? false;
     streamingQuality.value =
         AudioQuality.values[setBox.get('streamingQuality')];
     playerUi.value = isDesktop ? 0 : (setBox.get('playerUi') ?? 0);
@@ -286,6 +288,11 @@ class SettingsScreenController extends GetxController {
       await Hive.openBox("homeScreenData");
       Get.find<HomeScreenController>().cachedHomeScreenData(updateAll: true);
     }
+  }
+
+  Future<void> toggleLowBandwidthMode(bool val) async {
+    setBox.put("lowBandwidthMode", val);
+    lowBandwidthMode.value = val;
   }
 
   void toggleAutoDownloadFavoriteSong(bool val) {

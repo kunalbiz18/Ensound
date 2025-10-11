@@ -1,6 +1,7 @@
 // ignore_for_file: constant_identifier_names
 
 import 'dart:convert';
+import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:get/get.dart' as getx;
 import 'package:hive/hive.dart';
@@ -47,6 +48,13 @@ class MusicServices extends getx.GetxService {
   final dio = Dio();
 
   Future<void> init() async {
+    // Configure network timeouts and sane defaults
+    dio.options = BaseOptions(
+      connectTimeout: const Duration(seconds: 8),
+      receiveTimeout: const Duration(seconds: 15),
+      sendTimeout: const Duration(seconds: 10),
+      validateStatus: (status) => status != null && status >= 200 && status < 400,
+    );
     //check visitor id in data base, if not generate one , set lang code
     final date = DateTime.now();
     _context['context']['client']['clientVersion'] =
@@ -57,7 +65,15 @@ class MusicServices extends getx.GetxService {
     };
 
     final appPrefsBox = Hive.box('AppPrefs');
+    // Respect low bandwidth mode by lowering quality preference
+    final bool lowBandwidth = appPrefsBox.get('lowBandwidthMode') ?? false;
     hlCode = appPrefsBox.get('contentLanguage') ?? "en";
+    if (lowBandwidth) {
+      // Prefer lower quality results where server respects the flag
+      _context['context']['client']['experiments'] = {
+        'enableLowBitrateAudio': true,
+      };
+    }
     if (appPrefsBox.containsKey('visitorId')) {
       final visitorData = appPrefsBox.get("visitorId");
       if (visitorData != null && !isExpired(epoch: visitorData['exp'])) {
@@ -108,25 +124,40 @@ class MusicServices extends getx.GetxService {
   }
 
   Future<Response> _sendRequest(String action, Map<dynamic, dynamic> data,
-      {additionalParams = ""}) async {
-    //print("$baseUrl$action$fixedParms$additionalParams          data:$data");
-    try {
-      final response =
-          await dio.post("$baseUrl$action$fixedParms$additionalParams",
-              options: Options(
-                headers: _headers,
-              ),
-              data: data);
-
-      if (response.statusCode == 200) {
-        return response;
-      } else {
-        return _sendRequest(action, data, additionalParams: additionalParams);
+      {String additionalParams = "", int retries = 3}) async {
+    final String url = "$baseUrl$action$fixedParms$additionalParams";
+    int attempt = 0;
+    DioException? lastException;
+    while (attempt <= retries) {
+      try {
+        final response = await dio.post(
+          url,
+          options: Options(headers: _headers),
+          data: data,
+        );
+        // validateStatus already configured; still guard here
+        if (response.statusCode != null && response.statusCode! >= 200 && response.statusCode! < 400) {
+          return response;
+        }
+        // Non-success status: retry
+      } on DioException catch (e) {
+        lastException = e;
+        printINFO("Network attempt ${attempt + 1} failed: $e");
+      } catch (e) {
+        printINFO("Unexpected error: $e");
       }
-    } on DioException catch (e) {
-      printINFO("Error $e");
-      throw NetworkError();
+
+      if (attempt == retries) break;
+      // Exponential backoff with jitter
+      final backoffBaseMs = 400 * pow(2, attempt).toInt();
+      final jitterMs = Random().nextInt(200);
+      final delay = Duration(milliseconds: backoffBaseMs + jitterMs);
+      await Future.delayed(delay);
+      attempt += 1;
     }
+    // Give up after retries
+    if (lastException != null) printINFO("Final network error: $lastException");
+    throw NetworkError();
   }
 
   // Future<List<Map<String, dynamic>>>

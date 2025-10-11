@@ -64,6 +64,26 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
   // list of shuffled queue songs ids
   List<String> shuffledQueue = [];
 
+  // Prefetch management to reduce end-of-track stalls
+  String? _lastPrefetchedSongId;
+  void _initPrefetchState() {
+    _lastPrefetchedSongId = null;
+  }
+
+  void _maybePrefetchNext() {
+    try {
+      final currentQueueCopy = queue.value;
+      if (currentIndex == null || currentQueueCopy.isEmpty) return;
+      final nextIndex = _getNextSongIndex();
+      if (nextIndex == currentIndex) return;
+      final nextItem = currentQueueCopy[nextIndex];
+      if (_lastPrefetchedSongId == nextItem.id) return;
+      _lastPrefetchedSongId = nextItem.id;
+      // Warm the cache for the next item's stream URL; ignore result
+      checkNGetUrl(nextItem.id).catchError((_) {});
+    } catch (_) {}
+  }
+
   final _playList =
       ConcatenatingAudioSource(children: [], useLazyPreparation: false);
 
@@ -72,6 +92,7 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
       JustAudioMediaKit.title = 'Harmony music';
       JustAudioMediaKit.protocolWhitelist = const ['http', 'https', 'file'];
     }
+    _initPrefetchState();
     _mediaLibrary = MediaLibrary();
     _player = AudioPlayer(
         audioLoadConfiguration: const AudioLoadConfiguration(
@@ -163,33 +184,37 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
 
       //print("set ${playbackState.value.queueIndex},${event.currentIndex}");
     }, onError: (Object e, StackTrace st) async {
+      final Duration curPos = _player.position;
       if (e is PlayerException) {
         printERROR('Error code: ${e.code}');
         printERROR('Error message: ${e.message}');
       } else {
         printERROR('An error occurred: $e');
-        Duration curPos = _player.position;
-        await _player.stop();
+      }
 
-        if (isPlayingUsingLockCachingSource &&
-            e.toString().contains("Connection closed while receiving data")) {
-          await _player.seek(curPos, index: 0);
-          await _player.play();
-          return;
-        }
+      await _player.stop();
 
-        //Workaround when 403 error encountered
-        // customAction("playByIndex", {'index': currentIndex, 'newUrl': true})
-        //     .whenComplete(() async {
-        //   await _player.stop();
-        //   if (currentSongUrl == null) {
-        //     networkErrorPause = true;
-        //   } else {
-        //     _player.play();
-        //   }
-        // });
-        customAction("playByIndex", {'index': currentIndex, 'newUrl': true});
+      if (isPlayingUsingLockCachingSource &&
+          e.toString().contains("Connection closed while receiving data")) {
         await _player.seek(curPos, index: 0);
+        await _player.play();
+        return;
+      }
+
+      try {
+        await customAction("playByIndex", {'index': currentIndex, 'newUrl': true});
+        await _player.seek(curPos, index: 0);
+      } catch (_) {
+        try {
+          await customAction("playByIndex", {
+            'index': currentIndex,
+            'newUrl': true,
+            'preferLowQuality': true
+          });
+          await _player.seek(curPos, index: 0);
+        } catch (e2) {
+          printERROR('Recovery failed: $e2');
+        }
       }
     });
   }
@@ -202,6 +227,9 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
             : 0;
     _player.positionStream.listen((value) async {
       if (_player.duration != null && _player.duration?.inSeconds != 0) {
+        if (value.inMilliseconds > (_player.duration!.inMilliseconds * 0.5)) {
+          _maybePrefetchNext();
+        }
         if (value.inMilliseconds >=
             (_player.duration!.inMilliseconds - playerDurationOffset)) {
           await _triggerNext();
@@ -455,8 +483,9 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
         currentIndex = songIndex;
         final isNewUrlReq = extras['newUrl'] ?? false;
         final currentSong = queue.value[currentIndex];
-        final futureStreamInfo =
-            checkNGetUrl(currentSong.id, generateNewUrl: isNewUrlReq);
+        final bool preferLowQuality = extras['preferLowQuality'] ?? false;
+        final futureStreamInfo = checkNGetUrl(currentSong.id,
+            generateNewUrl: isNewUrlReq, preferLowQuality: preferLowQuality);
         final bool restoreSession = extras['restoreSession'] ?? false;
         isSongLoading = true;
         playbackState.add(playbackState.value
@@ -543,7 +572,9 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
 
       case 'setSourceNPlay':
         final currMed = (extras!['mediaItem'] as MediaItem);
-        final futureStreamInfo = checkNGetUrl(currMed.id);
+        final bool preferLowQuality = extras['preferLowQuality'] ?? false;
+        final futureStreamInfo =
+            checkNGetUrl(currMed.id, preferLowQuality: preferLowQuality);
         isSongLoading = true;
         currentIndex = 0;
         await _playList.clear();
@@ -774,7 +805,9 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
 
 // Work around used [useNewInstanceOfExplode = false] to Fix Connection closed before full header was received issue
   Future<HMStreamingData> checkNGetUrl(String songId,
-      {bool generateNewUrl = false, bool offlineReplacementUrl = false}) async {
+      {bool generateNewUrl = false,
+      bool offlineReplacementUrl = false,
+      bool preferLowQuality = false}) async {
     printINFO("Requested id : $songId");
     final songDownloadsBox = Hive.box("SongDownloads");
     if (!offlineReplacementUrl &&
@@ -840,7 +873,10 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
     } else {
       //check if song stream url is cached and allocate url accordingly
       final songsUrlCacheBox = Hive.box("SongsUrlCache");
-      final qualityIndex = Hive.box('AppPrefs').get('streamingQuality') ?? 1;
+      int qualityIndex = Hive.box('AppPrefs').get('streamingQuality') ?? 1;
+      if (preferLowQuality) {
+        qualityIndex = 0;
+      }
       HMStreamingData? streamInfo;
       if (songsUrlCacheBox.containsKey(songId) && !generateNewUrl) {
         final streamInfoJson = songsUrlCacheBox.get(songId);

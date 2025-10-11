@@ -143,6 +143,19 @@ class SettingsScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+                  ListTile(
+                    contentPadding: const EdgeInsets.only(left: 5, right: 10),
+                    title: Text("lowBandwidth".tr),
+                    subtitle: Text("lowBandwidthDes".tr,
+                        style: Theme.of(context).textTheme.bodyMedium),
+                    trailing: Obx(
+                      () => CustSwitch(
+                          value:
+                              settingsController.lowBandwidthMode.value,
+                          onChanged:
+                              settingsController.toggleLowBandwidthMode),
+                    ),
+                  ),
                   if (!isDesktop)
                     ListTile(
                       contentPadding: const EdgeInsets.only(left: 5, right: 10),
