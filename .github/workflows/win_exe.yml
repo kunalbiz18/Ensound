@@ -13,6 +13,10 @@ jobs:
           channel: 'stable'
           flutter-version: '3.24.2'
 
+      - name: Pub get
+        working-directory: "${{ github.workspace }}"
+        run: flutter pub get
+
       - name: Update lang data
         working-directory: "${{ github.workspace }}"
         run: dart localization/generator.dart
@@ -26,19 +30,20 @@ jobs:
         run: |
           flutter clean
           dart pub global activate flutter_distributor
+          flutter build windows --release
           flutter_distributor package --platform windows --targets exe
 
       - name: Find first .exe file
         id: find_exe
         run: |
-          $lastSubDir = Get-ChildItem -Path "${{ github.workspace }}/dist" -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          $exeFile = Get-ChildItem -Path "$($lastSubDir.FullName)/*.exe" | Select-Object -First 1
+          $exeFile = Get-ChildItem -Path "${{ github.workspace }}\dist" -Filter *.exe -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($exeFile) {
-              echo "Found .exe file: $($exeFile.FullName)"
-              echo "::set-output name=exe_path::$($exeFile.FullName)"
-          } else {
-              Write-Error "No .exe files found in the dist directory."
-              exit 1
+            Write-Host "Found .exe file: $($exeFile.FullName)"
+            "exe_path=$($exeFile.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+          else {
+            Write-Error "No .exe files found in the dist directory."
+            exit 1
           }
           
       - name: Set up osslsigncode
@@ -52,6 +57,7 @@ jobs:
         run: mkdir signed
 
       - name: Collecting certs and key
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${{ secrets.KEY_PEM }}")) | Out-File -FilePath key.pem -Encoding ASCII
@@ -59,6 +65,7 @@ jobs:
           cp "${{ github.workspace }}/win_cert/cert.pem" .
 
       - name: Sign executable
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           $exePath = "${{ steps.find_exe.outputs.exe_path }}"
@@ -66,13 +73,27 @@ jobs:
           & "${{ github.workspace }}/osslsigncode/bin/osslsigncode.exe" sign -certs cert.pem -key key.pem -t http://timestamp.digicert.com -in "$exePath" -out "$signedExePath"
 
       - name: Verify signature
+        if: ${{ secrets.KEY_PEM != '' }}
         working-directory: "${{ github.workspace }}/signed"
         run: |
           $signedExePath = "${{ steps.find_exe.outputs.exe_path }}".Replace(".exe", "_signed.exe")
           & "${{ github.workspace }}/osslsigncode/bin/osslsigncode.exe" verify -in "$signedExePath" -TSA-CAfile DigiCertGlobalRootCA.crt -CAfile cert.pem
+
+      - name: Select artifact path (signed if available)
+        id: choose_upload
+        run: |
+          $exePath = "${{ steps.find_exe.outputs.exe_path }}"
+          $signed = $exePath.Replace(".exe", "_signed.exe")
+          if (Test-Path "$signed") {
+            Write-Host "Using signed artifact: $signed"
+            "upload_path=$signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "Using unsigned artifact: $exePath"
+            "upload_path=$exePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
           
       - name: Upload Windows exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Harmony music windows exe
-          path: "${{ github.workspace }}/dist/**/*signed.exe"
+          name: Ensound Windows exe
+          path: "${{ steps.choose_upload.outputs.upload_path }}"
